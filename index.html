@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>VídeoGen IA — Gerar vídeo</title>
+<meta name="description" content="VídeoGen IA - gere vídeos automáticos a partir de texto, áudio, imagem ou vídeo." />
+<style>
+  :root{
+    --bg:#0f1724; --card:#0b1220; --accent:#ff3b81; --accent-2:#ffd166; --muted:#9aa4b2;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:Inter,system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:linear-gradient(180deg,var(--bg),#071028);color:#fff;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
+  .card{width:100%;max-width:920px;background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));border-radius:16px;padding:20px;box-shadow:0 10px 30px rgba(2,6,23,0.6);border:1px solid rgba(255,255,255,0.03)}
+  h1{margin:0;font-size:28px}
+  p.lead{margin:6px 0 18px;color:var(--muted)}
+  .row{display:flex;gap:12px;flex-wrap:wrap}
+  label{display:block;margin-bottom:6px;color:var(--muted);font-size:13px}
+  textarea, input[type="number"], input[type="file"], input[type="text"]{width:100%;padding:10px;border-radius:8px;border:1px solid rgba(255,255,255,0.04);background:rgba(255,255,255,0.02);color:#fff}
+  .col{flex:1;min-width:220px}
+  .controls{display:flex;gap:10px;align-items:center;margin-top:8px}
+  button{background:var(--accent);border:none;padding:10px 14px;border-radius:10px;color:#08101a;font-weight:700;cursor:pointer}
+  button.secondary{background:transparent;border:1px solid rgba(255,255,255,0.06);color:var(--muted);font-weight:600}
+  .muted{color:var(--muted);font-size:13px}
+  video{width:100%;border-radius:12px;margin-top:12px;background:#000}
+  footer{margin-top:18px;color:var(--muted);font-size:13px;text-align:center}
+  .small{font-size:12px;color:var(--muted)}
+  .switch{display:inline-flex;align-items:center;gap:8px}
+  .notice{background:rgba(255,255,255,0.02);padding:10px;border-radius:8px;border:1px solid rgba(255,255,255,0.03);margin-top:10px;color:var(--muted)}
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>VídeoGen IA</h1>
+    <p class="lead">Crie vídeos automáticos a partir de texto, áudio, imagem ou vídeo. Versão inicial: grátis até ~15s. <span class="small">Estilo: cores vivas (Opção C)</span></p>
+
+    <div>
+      <label>Texto (opcional) — será usado como roteiro / legenda</label>
+      <textarea id="textInput" rows="3" placeholder="Digite o texto que quer narrado/legenda..."></textarea>
+    </div>
+
+    <div style="margin-top:12px" class="row">
+      <div class="col">
+        <label>Áudio (opcional) — envie um arquivo ou grave</label>
+        <input id="audioFile" type="file" accept="audio/*" />
+        <div class="controls" style="margin-top:8px">
+          <button id="startRec">Gravar</button>
+          <button id="stopRec" class="secondary" disabled>Parar</button>
+          <label class="switch small"><input id="useTTS" type="checkbox"> Usar voz automática (ElevenLabs via proxy)</label>
+        </div>
+      </div>
+      <div class="col">
+        <label>Imagem (avatar) — ou envie um vídeo base</label>
+        <input id="imageFile" type="file" accept="image/*" />
+        <div class="small" style="margin-top:8px">Ou envie um vídeo base (será usado; o áudio será muxado quando aplicável)</div>
+        <input id="videoFile" type="file" accept="video/*" style="margin-top:8px" />
+      </div>
+    </div>
+
+    <div style="margin-top:12px" class="row">
+      <div style="flex:0 0 160px">
+        <label>Duração (segundos) — usado se não houver áudio</label>
+        <input id="durationSec" type="number" value="15" min="1" max="120" />
+      </div>
+    </div>
+
+    <div class="controls" style="margin-top:14px">
+      <button id="generateBtn">Gerar Vídeo 🎬</button>
+      <button id="downloadBtn" class="secondary" disabled>Baixar</button>
+      <div id="status" class="muted" style="margin-left:10px">Pronto.</div>
+    </div>
+
+    <div class="notice" id="note">
+      Observação: este projeto roda *inteiramente no navegador* usando ffmpeg.wasm. Para gerar voz automática, o texto será enviado ao endpoint <code>/api/tts</code> que usa a chave da ElevenLabs guardada em variável de ambiente. Versões longas/avançadas podem requerer backend e serviços pagos.
+    </div>
+
+    <div id="playerArea" style="margin-top:12px"></div>
+
+    <footer>Todos os direitos reservados • <strong>Grana sem Terno</strong> — VídeoGen IA</footer>
+  </div>
+
+<script type="module">
+import { createFFmpeg, fetchFile } from 'https://unpkg.com/@ffmpeg/ffmpeg@0.11.1/dist/ffmpeg.min.mjs';
+
+const ffmpeg = createFFmpeg({ log: true });
+let ffmpegLoaded = false;
+const $ = id => document.getElementById(id);
+
+async function ensureFFmpeg() {
+  if (!ffmpegLoaded) {
+    $('status').textContent = 'Carregando FFmpeg (pode demorar)...';
+    await ffmpeg.load();
+    ffmpegLoaded = true;
+    $('status').textContent = 'FFmpeg carregado.';
+  }
+}
+
+let mediaRecorder = null;
+let recordedChunks = [];
+
+$('startRec').addEventListener('click', async () => {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    recordedChunks = [];
+    mediaRecorder = new MediaRecorder(stream);
+    mediaRecorder.ondataavailable = e => { if (e.data.size) recordedChunks.push(e.data); };
+    mediaRecorder.onstop = () => {
+      const blob = new Blob(recordedChunks, { type: 'audio/webm' });
+      const file = new File([blob], 'recorded.webm', { type: 'audio/webm' });
+      const dataTransfer = new DataTransfer();
+      dataTransfer.items.add(file);
+      $('audioFile').files = dataTransfer.files;
+      $('status').textContent = 'Gravação pronta (arquivo definido).';
+    };
+    mediaRecorder.start();
+    $('startRec').disabled = true;
+    $('stopRec').disabled = false;
+    $('status').textContent = 'Gravando...';
+  } catch (err) {
+    console.error(err);
+    alert('Erro ao acessar microfone: ' + err.message);
+  }
+});
+$('stopRec').addEventListener('click', () => {
+  if (mediaRecorder) mediaRecorder.stop();
+  $('startRec').disabled = false;
+  $('stopRec').disabled = true;
+});
+
+async function generateTTS(text) {
+  const res = await fetch('/api/tts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text })
+  });
+  if (!res.ok) throw new Error('Erro no proxy: ' + res.status);
+  const blob = await res.blob();
+  return new File([blob], 'tts.mp3', { type: 'audio/mpeg' });
+}
+
+async function getAudioDuration(file) {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const a = new Audio(url);
+    a.addEventListener('loadedmetadata', () => resolve(a.duration || 0));
+    a.addEventListener('error', () => resolve(0));
+  });
+}
+
+async function handleGenerate() {
+  try {
+    $('status').textContent = 'Preparando...';
+    await ensureFFmpeg();
+    $('generateBtn').disabled = true;
+    const text = $('textInput').value.trim();
+    const useTts = $('useTTS').checked;
+
+    let audioFile = $('audioFile').files[0] || null;
+    if (useTts && text) {
+      $('status').textContent = 'Gerando voz com ElevenLabs via proxy...';
+      audioFile = await generateTTS(text);
+      $('status').textContent = 'Voz gerada.';
+    }
+
+    const videoFile = $('videoFile').files[0] || null;
+    const imageFile = $('imageFile').files[0] || null;
+    const duration = Number($('durationSec').value) || 15;
+
+    try { ffmpeg.FS('unlink', 'out.mp4'); } catch(e) {}
+
+    if (videoFile) {
+      $('status').textContent = 'Processando vídeo base...';
+      ffmpeg.FS('writeFile', 'input.mp4', await fetchFile(videoFile));
+      if (audioFile) {
+        ffmpeg.FS('writeFile', 'input_audio', await fetchFile(audioFile));
+        await ffmpeg.run('-i', 'input.mp4', '-i', 'input_audio', '-c:v', 'copy', '-c:a', 'aac', '-shortest', 'out.mp4');
+      } else {
+        await ffmpeg.run('-i', 'input.mp4', '-c', 'copy', 'out.mp4');
+      }
+    } else {
+      $('status').textContent = 'Construindo vídeo...';
+      if (imageFile) {
+        ffmpeg.FS('writeFile', 'image.png', await fetchFile(imageFile));
+        if (audioFile) {
+          ffmpeg.FS('writeFile', 'audio', await fetchFile(audioFile));
+          const dur = Math.ceil(await getAudioDuration(audioFile)) || duration;
+          await ffmpeg.run('-loop', '1', '-i', 'image.png', '-i', 'audio', '-c:v', 'libx264', '-t', String(dur), '-c:a', 'aac', '-b:a', '192k', '-pix_fmt', 'yuv420p', '-shortest', 'out.mp4');
+        } else {
+          await ffmpeg.run('-loop', '1', '-i', 'image.png', '-c:v', 'libx264', '-t', String(duration), '-pix_fmt', 'yuv420p', 'out.mp4');
+        }
+      }
+    }
+
+    const data = ffmpeg.FS('readFile', 'out.mp4');
+    const blob = new Blob([data.buffer], { type: 'video/mp4' });
+    const url = URL.createObjectURL(blob);
+    showPlayer(url);
+    $('downloadBtn').disabled = false;
+    $('downloadBtn').onclick = () => {
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'videogenia_' + Date.now() + '.mp4';
+      a.click();
+    };
+    $('status').textContent = 'Pronto! Vídeo gerado.';
+  } catch (err) {
+    console.error(err);
+    alert('Erro: ' + err.message);
+    $('status').textContent = 'Erro: ' + err.message;
+  } finally {
+    $('generateBtn').disabled = false;
+  }
+}
+
+function showPlayer(src) {
+  const area = $('playerArea');
+  area.innerHTML = '';
+  const video = document.createElement('video');
+  video.controls = true;
+  video.src = src;
+  video.style.borderRadius = '12px';
+  area.appendChild(video);
+}
+
+$('generateBtn').addEventListener('click', handleGenerate);
+
+document.addEventListener('click', () => {
+  if (!ffmpegLoaded) ensureFFmpeg();
+}, { once: true });
+
+</script>
+</body>
+</html>
